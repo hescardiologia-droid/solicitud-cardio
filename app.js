@@ -33,8 +33,7 @@
     intermedios: ['fecha_nacimiento', 'historia', 'presion'],
     emergencia: ['servicio']
   };
-  // Áreas en las que la página principal no muestra cuántos cupos quedan.
-  const OCULTAR_CUPOS = ['cardio_cxcv'];
+  const NOMBRES_DIA = ['lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado', 'domingo'];
 
   const CAMPOS = [
     { k: 'estudio', t: 'Estudio solicitado', tipo: 'radio', op: ESTUDIOS, ancho: true },
@@ -137,12 +136,35 @@
   function estadoDe(clave) {
     return E.estado ? E.estado.areas.filter(function (a) { return a.clave === clave; })[0] : null;
   }
+  // Por decisión del servicio, la app no muestra cupos disponibles ni hora de cierre: solo la hora de apertura.
   function textoEstado(a) {
-    if (!a.abierto) return a.motivo.charAt(0).toUpperCase() + a.motivo.slice(1);
+    if (!a.abierto) return mensajeCerrado(a);
     if (a.cupo_extra) return 'Cupo extra habilitado por Cardiología';
-    const hasta = 'hasta las ' + hora12(a.hora_cierra);
-    if (a.disponibles === null || OCULTAR_CUPOS.indexOf(a.clave) >= 0) return 'Abierto ' + hasta;
-    return a.disponibles + (a.disponibles === 1 ? ' cupo disponible' : ' cupos disponibles') + ' · ' + hasta;
+    return 'Abierto desde las ' + hora12(a.hora_abre);
+  }
+  /** "mañana", "el lunes"… según los días en que abre el formulario (1 = lunes … 7 = domingo). */
+  function proximoDia(a) {
+    const p = String((E.estado && E.estado.fecha) || '').split('-');
+    if (p.length !== 3 || !a.dias || !a.dias.length) return '';
+    const hoy = (new Date(Date.UTC(Number(p[0]), Number(p[1]) - 1, Number(p[2]))).getUTCDay() + 6) % 7 + 1;
+    for (let k = 1; k <= 7; k++) {
+      const d = (hoy - 1 + k) % 7 + 1;
+      if (a.dias.indexOf(d) >= 0) return k === 1 ? 'mañana' : (k === 7 ? 'el próximo ' : 'el ') + NOMBRES_DIA[d - 1];
+    }
+    return '';
+  }
+  function mensajeCerrado(a) {
+    const m = String(a.motivo || '');
+    const dia = proximoDia(a);
+    const reabre = dia ? ', se apertura de nuevo ' + dia + ' a las ' + hora12(a.hora_abre) : '';
+    if (/^abre a las/.test(m)) return 'Formulario cerrado, se apertura hoy a las ' + hora12(a.hora_abre);
+    if (/^cupos agotados|^cerró a las/.test(m)) return 'Formulario cerrado, se ha alcanzado el límite de cupos o excedido el límite horario' + reabre;
+    if (/^cerrado hoy/.test(m)) {
+      const porque = /\((.*)\)/.exec(m);
+      return 'Formulario cerrado hoy' + (porque ? ' (' + porque[1] + ')' : '') + reabre;
+    }
+    if (/^hoy no se reciben/.test(m)) return 'Formulario cerrado hoy' + reabre;
+    return 'Formulario cerrado temporalmente';
   }
 
   /* ---------- pantallas ---------- */
@@ -211,12 +233,12 @@
         : h('div', { class: 'esqueleto' }));
       return;
     }
+    // Si esta persona acaba de enviar (aunque con su envío se hayan agotado los cupos), se le sigue mostrando su confirmación.
+    if (E.form && E.form.area === area.clave && E.form.enviado) { pintarExito(main, area); return; }
     if (!a.abierto) {
       main.appendChild(h('div', { class: 'tarjeta' },
         h('div', { class: 'encabezado-form' }, h('h2', null, area.nombre), h('span', { class: 'pastilla cerrado' }, 'Cerrado')),
-        h('div', { class: 'aviso alerta' }, h('strong', null, 'Este formulario no está recibiendo solicitudes'),
-          a.motivo.charAt(0).toUpperCase() + a.motivo.slice(1) + '.'),
-        h('p', { class: 'nota-oblig' }, 'Horario habitual: de ' + hora12(a.hora_abre) + ' a ' + hora12(a.hora_cierra)),
+        h('div', { class: 'aviso alerta' }, mensajeCerrado(a).replace(/([^.])$/, '$1.')),
         h('p', { class: 'nota-oblig' }, 'Si el caso no puede esperar, comuníquese con el Servicio de Cardiología para que habiliten un cupo extra.'),
         h('div', { class: 'acciones' },
           h('button', { class: 'btn', onclick: volver }, 'Volver al inicio'),
@@ -689,7 +711,8 @@
       btn.disabled = false;
       const cerrado = e.code === 'CERRADO';
       cajaError.appendChild(h('div', { class: 'aviso error', role: 'alert' },
-        h('strong', null, cerrado ? 'El formulario se cerró' : 'No se pudo enviar la solicitud'), e.message,
+        h('strong', null, cerrado ? 'El formulario se cerró' : 'No se pudo enviar la solicitud'),
+        cerrado ? 'Se alcanzó el límite de cupos o el límite horario mientras se llenaba la solicitud.' : e.message,
         e.code === 'RED' ? ' Sus datos siguen en pantalla: puede volver a intentar sin escribir de nuevo.' : ''));
       if (e.code === 'CODIGO') { const c = document.getElementById('in-codigo'); if (c) c.focus(); }
       cajaError.scrollIntoView({ behavior: 'smooth', block: 'center' });
