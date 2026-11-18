@@ -26,7 +26,15 @@
   ];
 
   // En Emergencia solo estos campos son obligatorios (debe coincidir con la API).
-  const OBLIGATORIOS_EMERGENCIA = ['estudio', 'prioridad', 'nombre', 'diagnostico', 'motivo', 'medico', 'contacto'];
+  const OBLIGATORIOS_EMERGENCIA = ['nombre', 'expediente', 'edad', 'sexo'];
+  // Preguntas que NO aparecen en el formulario de cada área (debe coincidir con la API de formularios).
+  const CAMPOS_QUITADOS = {
+    intensivos: ['fecha_nacimiento', 'historia', 'presion'],
+    intermedios: ['fecha_nacimiento', 'historia', 'presion'],
+    emergencia: ['servicio']
+  };
+  // Áreas en las que la página principal no muestra cuántos cupos quedan.
+  const OCULTAR_CUPOS = ['cardio_cxcv'];
 
   const CAMPOS = [
     { k: 'estudio', t: 'Estudio solicitado', tipo: 'radio', op: ESTUDIOS, ancho: true },
@@ -133,7 +141,7 @@
     if (!a.abierto) return a.motivo.charAt(0).toUpperCase() + a.motivo.slice(1);
     if (a.cupo_extra) return 'Cupo extra habilitado por Cardiología';
     const hasta = 'hasta las ' + hora12(a.hora_cierra);
-    if (a.disponibles === null) return 'Abierto ' + hasta;
+    if (a.disponibles === null || OCULTAR_CUPOS.indexOf(a.clave) >= 0) return 'Abierto ' + hasta;
     return a.disponibles + (a.disponibles === 1 ? ' cupo disponible' : ' cupos disponibles') + ' · ' + hasta;
   }
 
@@ -230,7 +238,8 @@
 
   function construirFormulario(area, a) {
     const F = E.form;
-    const campos = CAMPOS.filter(function (c) { return !(c.k === 'servicio' && area.clave === 'emergencia'); });
+    const quitados = CAMPOS_QUITADOS[area.clave] || [];
+    const campos = CAMPOS.filter(function (c) { return quitados.indexOf(c.k) < 0; });
     const rejilla = h('div', { class: 'rejilla' });
     const cajaError = h('div');
 
@@ -361,10 +370,17 @@
             pintarZona();
           } });
         if (arch) {
+          const editar = arch.vista ? h('button', { type: 'button', class: 'btn', onclick: async function () {
+            const r = await abrirEditor(arch, c.t);
+            if (!r) return;
+            Object.assign(arch, r);
+            marcarSucio();
+            pintarZona();
+          } }, 'Editar') : null;
           agregar(zona, [
             arch.vista ? h('img', { class: 'mini', src: arch.vista, alt: 'Vista previa' }) : h('div', { class: 'mini' }, 'PDF'),
-            h('div', { class: 'info' }, h('b', null, arch.nombre), h('span', null, tamano(arch.blob.size))),
-            h('label', { class: 'btn', for: id }, 'Cambiar'), entrada]);
+            h('div', { class: 'info' }, h('b', null, arch.nombre), h('span', null, tamano(arch.blob.size) + (arch.editada ? ' · editada' : ''))),
+            h('div', { class: 'botones-archivo' }, editar, h('label', { class: 'btn', for: id }, 'Cambiar')), entrada]);
         } else {
           agregar(zona, [h('div', { class: 'info' }, h('b', null, 'Ningún archivo seleccionado'), h('span', null, 'JPG, JPEG, PNG o PDF · máximo 8 MB')),
             h('label', { class: 'btn', for: id }, 'Cargar archivo'), entrada]);
@@ -450,7 +466,160 @@
       URL.revokeObjectURL(url);
     }
     if (blob.size > MAX_BYTES) throw new Error('La imagen pesa ' + tamano(blob.size) + '. El máximo es 8 MB.');
-    return { blob: blob, nombre: nombre, vista: await leerDataUrl(blob) };
+    // "original" se conserva para que cada edición parta de la foto sin pérdidas acumuladas.
+    return { blob: blob, nombre: nombre, vista: await leerDataUrl(blob), original: blob, edicion: { giro: 0, recorte: null }, editada: false };
+  }
+
+  /* ---------- editor de imagen: girar y recortar ---------- */
+  const RECORTE_COMPLETO = { x: 0, y: 0, w: 1, h: 1 };
+  const RECORTE_MIN = 0.08; // el recorte no puede ser menor que el 8 % del lado
+
+  /** Gira el rectángulo de recorte (coordenadas de 0 a 1) junto con la imagen. */
+  function girarRecorte(r, sentido) {
+    return sentido > 0 ? { x: 1 - (r.y + r.h), y: r.x, w: r.h, h: r.w } : { x: r.y, y: 1 - (r.x + r.w), w: r.h, h: r.w };
+  }
+
+  /** Dibuja la imagen girada "giro" cuartos de vuelta (horario) en un lienzo de ancho x alto. */
+  function dibujarGirada(g, img, giro, ancho, alto) {
+    g.save();
+    g.fillStyle = '#fff';
+    g.fillRect(0, 0, ancho, alto);
+    g.translate(ancho / 2, alto / 2);
+    g.rotate(giro * Math.PI / 2);
+    const impar = giro % 2 === 1;
+    const w = impar ? alto : ancho, hh = impar ? ancho : alto;
+    g.drawImage(img, -w / 2, -hh / 2, w, hh);
+    g.restore();
+  }
+
+  /** Abre el editor. Devuelve una promesa con {blob, vista, edicion, editada} o null si se cancela. */
+  function abrirEditor(arch, titulo) {
+    return new Promise(async function (resolver) {
+      const url = URL.createObjectURL(arch.original || arch.blob);
+      let img;
+      try { img = await cargarImagen(url); } catch (e) { URL.revokeObjectURL(url); alert(e.message); resolver(null); return; }
+      let giro = arch.edicion ? arch.edicion.giro : 0;
+      let rec = Object.assign({}, (arch.edicion && arch.edicion.recorte) || RECORTE_COMPLETO);
+
+      const lienzo = h('canvas', { class: 'ed-lienzo', 'aria-label': 'Imagen a editar' });
+      const caja = h('div', { class: 'ed-recorte', 'data-modo': 'mover', 'aria-label': 'Área de recorte. Arrástrela para moverla.' },
+        ['n', 's', 'e', 'w', 'nw', 'ne', 'sw', 'se'].map(function (m) { return h('span', { class: 'ed-asa ed-' + m, 'data-modo': m }); }));
+      const marco = h('div', { class: 'ed-marco' }, lienzo, caja);
+      const escenario = h('div', { class: 'ed-escenario' }, marco);
+      const capa = h('div', { class: 'capa editor', role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Editar ' + titulo });
+
+      const cerrar = function (valor) {
+        window.removeEventListener('resize', dibujar);
+        document.removeEventListener('keydown', tecla);
+        URL.revokeObjectURL(url);
+        capa.remove();
+        document.body.style.overflow = '';
+        resolver(valor);
+      };
+      const tecla = function (ev) { if (ev.key === 'Escape') cerrar(null); };
+
+      function dibujar() {
+        const impar = giro % 2 === 1;
+        const rw = impar ? img.naturalHeight : img.naturalWidth, rh = impar ? img.naturalWidth : img.naturalHeight;
+        const dispW = Math.max(120, escenario.clientWidth - 24), dispH = Math.max(120, escenario.clientHeight - 24);
+        const k = Math.min(dispW / rw, dispH / rh);
+        const w = Math.round(rw * k), hh = Math.round(rh * k);
+        const dpr = Math.min(window.devicePixelRatio || 1, 2);
+        lienzo.width = Math.round(w * dpr);
+        lienzo.height = Math.round(hh * dpr);
+        marco.style.width = w + 'px';
+        marco.style.height = hh + 'px';
+        dibujarGirada(lienzo.getContext('2d'), img, giro, lienzo.width, lienzo.height);
+        pintarRecorte();
+      }
+      function pintarRecorte() {
+        caja.style.left = (rec.x * 100) + '%';
+        caja.style.top = (rec.y * 100) + '%';
+        caja.style.width = (rec.w * 100) + '%';
+        caja.style.height = (rec.h * 100) + '%';
+      }
+
+      // Arrastre con dedo o ratón: mover el recuadro o estirarlo desde sus bordes y esquinas.
+      let arrastre = null;
+      caja.addEventListener('pointerdown', function (ev) {
+        ev.preventDefault();
+        caja.setPointerCapture(ev.pointerId);
+        arrastre = { modo: ev.target.getAttribute('data-modo') || 'mover', x0: ev.clientX, y0: ev.clientY, r0: Object.assign({}, rec),
+          W: marco.clientWidth, H: marco.clientHeight };
+      });
+      caja.addEventListener('pointermove', function (ev) {
+        if (!arrastre) return;
+        const a = arrastre, dx = (ev.clientX - a.x0) / a.W, dy = (ev.clientY - a.y0) / a.H, r = a.r0;
+        const lim = function (v, mn, mx) { return Math.max(mn, Math.min(mx, v)); };
+        const n = Object.assign({}, r);
+        if (a.modo === 'mover') {
+          n.x = lim(r.x + dx, 0, 1 - r.w);
+          n.y = lim(r.y + dy, 0, 1 - r.h);
+        } else {
+          if (a.modo.indexOf('w') >= 0) { n.x = lim(r.x + dx, 0, r.x + r.w - RECORTE_MIN); n.w = r.x + r.w - n.x; }
+          if (a.modo.indexOf('e') >= 0) { n.w = lim(r.w + dx, RECORTE_MIN, 1 - r.x); }
+          if (a.modo.indexOf('n') >= 0) { n.y = lim(r.y + dy, 0, r.y + r.h - RECORTE_MIN); n.h = r.y + r.h - n.y; }
+          if (a.modo.indexOf('s') >= 0) { n.h = lim(r.h + dy, RECORTE_MIN, 1 - r.y); }
+        }
+        rec = n;
+        pintarRecorte();
+      });
+      const soltar = function () { arrastre = null; };
+      caja.addEventListener('pointerup', soltar);
+      caja.addEventListener('pointercancel', soltar);
+
+      const girar = function (sentido) {
+        giro = (giro + sentido + 4) % 4;
+        rec = girarRecorte(rec, sentido);
+        dibujar();
+      };
+
+      async function aplicar(btn) {
+        const completo = rec.x <= 0.001 && rec.y <= 0.001 && rec.w >= 0.999 && rec.h >= 0.999;
+        if (giro === 0 && completo) {
+          const b0 = arch.original || arch.blob;
+          cerrar({ blob: b0, vista: await leerDataUrl(b0), edicion: { giro: 0, recorte: null }, editada: false });
+          return;
+        }
+        btn.disabled = true;
+        btn.textContent = 'Guardando…';
+        const impar = giro % 2 === 1;
+        const rw = impar ? img.naturalHeight : img.naturalWidth, rh = impar ? img.naturalWidth : img.naturalHeight;
+        const girada = document.createElement('canvas');
+        girada.width = rw;
+        girada.height = rh;
+        dibujarGirada(girada.getContext('2d'), img, giro, rw, rh);
+        const px = Math.round(rec.x * rw), py = Math.round(rec.y * rh);
+        const pw = Math.max(1, Math.round(rec.w * rw)), ph = Math.max(1, Math.round(rec.h * rh));
+        const salida = document.createElement('canvas');
+        salida.width = pw;
+        salida.height = ph;
+        salida.getContext('2d').drawImage(girada, px, py, pw, ph, 0, 0, pw, ph);
+        const blob = await new Promise(function (ok) { salida.toBlob(ok, 'image/jpeg', 0.9); });
+        if (!blob) { btn.disabled = false; btn.textContent = 'Aplicar'; alert('No se pudo guardar la imagen editada.'); return; }
+        cerrar({ blob: blob, vista: await leerDataUrl(blob), edicion: { giro: giro, recorte: completo ? null : rec }, editada: true });
+      }
+
+      const btnAplicar = h('button', { type: 'button', class: 'btn primario', onclick: function (ev) { aplicar(ev.currentTarget); } }, 'Aplicar');
+      agregar(capa, h('div', { class: 'ed-caja' },
+        h('div', { class: 'ed-cab' }, h('strong', null, 'Editar ' + titulo),
+          h('span', null, 'Arrastre el recuadro o sus bordes para recortar.')),
+        escenario,
+        h('div', { class: 'ed-barra' },
+          h('div', { class: 'ed-grupo' },
+            h('button', { type: 'button', class: 'btn', onclick: function () { girar(-1); }, 'aria-label': 'Girar a la izquierda' }, '⟲ Girar'),
+            h('button', { type: 'button', class: 'btn', onclick: function () { girar(1); }, 'aria-label': 'Girar a la derecha' }, 'Girar ⟳'),
+            h('button', { type: 'button', class: 'btn', onclick: function () { giro = 0; rec = Object.assign({}, RECORTE_COMPLETO); dibujar(); } }, 'Restablecer')),
+          h('div', { class: 'ed-grupo' },
+            h('button', { type: 'button', class: 'btn', onclick: function () { cerrar(null); } }, 'Cancelar'),
+            btnAplicar))));
+      document.body.appendChild(capa);
+      document.body.style.overflow = 'hidden';
+      window.addEventListener('resize', dibujar);
+      document.addEventListener('keydown', tecla);
+      dibujar();
+      btnAplicar.focus();
+    });
   }
 
   /* ---------- validación y envío ---------- */
