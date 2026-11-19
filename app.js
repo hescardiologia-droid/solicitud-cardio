@@ -206,7 +206,7 @@
     $app.appendChild(h('main', { class: 'contenido' },
       h('section', { class: 'leyenda' },
         h('h2', null, 'FORMULARIO PARA SOLICITUD DE ESTUDIO CARDIOLOGICO'),
-        h('p', null, 'Los estudios pueden ser solicitados de Lunes a Viernes en Horario de 6am a 12pm')),
+        h('p', null, 'Los estudios pueden ser solicitados de Lunes a Viernes desde las 6am')),
       E.errorEstado ? h('div', { class: 'aviso error', role: 'alert' }, h('strong', null, 'No se pudo consultar la disponibilidad'), E.errorEstado) : null,
       h('div', { class: 'fila-estado' },
         h('h3', null, 'Seleccione el área que solicita'),

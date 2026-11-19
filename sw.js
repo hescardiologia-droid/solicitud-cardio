@@ -1,6 +1,6 @@
 // Service worker: guarda la "cáscara" de la app para que abra aunque la conexión falle.
 // Nunca guarda solicitudes ni datos de pacientes: solo los archivos de la propia app.
-const CACHE = 'cardio-formularios-v3';
+const CACHE = 'cardio-formularios-v4';
 const ARCHIVOS = ['./', 'index.html', 'styles.css', 'app.js', 'config.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
